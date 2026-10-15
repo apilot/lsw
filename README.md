@@ -86,6 +86,8 @@ locations and per-repo errors.
 | `-2`, `-3` | scan subdirectories deeper (default depth 1). Repos found deeper are labelled by their nesting path (`team/webapp`); worktrees of an already-listed repo are not duplicated |
 | `--debug` | show per-repo errors on stderr; stale/broken repos are skipped silently otherwise |
 | `--no-icons` | disable Nerd Font glyphs |
+| `-v`, `-V`, `--version` | print version |
+| `-h`, `--help` | list all flags |
 
 Environment: `NO_COLOR` and `NO_ICONS` force plain output. Output is
 ANSI-colored only in a TTY — safe to pipe into `grep`/`fzf`.
