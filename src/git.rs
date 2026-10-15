@@ -12,7 +12,6 @@ use crate::parse::{
 #[derive(Debug)]
 pub enum LswError {
     Io { path: PathBuf, source: io::Error },
-    NoRepos(PathBuf),
     Git(String),
 }
 
@@ -20,9 +19,6 @@ impl std::fmt::Display for LswError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LswError::Io { path, source } => write!(f, "{}: {}", path.display(), source),
-            LswError::NoRepos(p) => {
-                write!(f, "no git repositories found in {}", p.display())
-            }
             LswError::Git(msg) => write!(f, "git {msg}"),
         }
     }
@@ -90,4 +86,46 @@ pub fn numstat_of(worktree: &Path) -> Vec<(String, Option<u32>, Option<u32>)> {
     run(worktree, &["diff", "--numstat", "HEAD"])
         .map(|out| parse_numstat(&out))
         .unwrap_or_default()
+}
+
+/// `origin` URL of the repository, best-effort (`None` when unset).
+pub fn remote_of(repo: &Path) -> Option<String> {
+    run(repo, &["remote", "get-url", "origin"])
+        .ok()
+        .map(|url| url.trim().to_owned())
+        .filter(|url| !url.is_empty())
+}
+
+/// Compact display form of a remote URL: `git@github.com:apilot/lsw.git`,
+/// `https://github.com/apilot/lsw.git` and `ssh://git@github.com/a/b` all
+/// become `github.com/apilot/lsw`. Anything else passes through trimmed
+/// (local paths stay readable as-is).
+pub fn short_remote(url: &str) -> String {
+    let url = url.trim().trim_end_matches('/');
+    let url = url.strip_suffix(".git").unwrap_or(url);
+    if let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .or_else(|| url.strip_prefix("ssh://"))
+    {
+        return rest.strip_prefix("git@").unwrap_or(rest).to_owned();
+    }
+    if let Some(rest) = url.strip_prefix("git@") {
+        return rest.replacen(':', "/", 1);
+    }
+    url.to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::short_remote;
+
+    #[test]
+    fn short_remote_normalizes_common_url_forms() {
+        assert_eq!(short_remote("git@github.com:apilot/lsw.git"), "github.com/apilot/lsw");
+        assert_eq!(short_remote("https://github.com/apilot/lsw.git"), "github.com/apilot/lsw");
+        assert_eq!(short_remote("http://gitlab.corp/team/proj/"), "gitlab.corp/team/proj");
+        assert_eq!(short_remote("ssh://git@host.tld/x/y.git"), "host.tld/x/y");
+        assert_eq!(short_remote("/srv/git/lsw"), "/srv/git/lsw");
+    }
 }

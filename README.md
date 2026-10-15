@@ -45,12 +45,13 @@ into `~/.local/bin` (override with `LSW_PREFIX`).
 ## Usage
 
 Run inside a repository to list **its** worktrees, or inside any folder to
-scan repositories one level deep:
+scan repositories one level deep (`-2` / `-3` to look deeper):
 
 ```sh
 lsw            # tree view
 lsw -b         # blocks: full-width cards with more fields
 lsw -bp        # + breakdown of what exactly is dirty
+lsw -2         # tree view, scanning subdirectories two levels deep
 ```
 
 `-b` adds the remote tracking branch and the last commit;
@@ -63,6 +64,7 @@ lsw -bp        # + breakdown of what exactly is dirty
 
 | Token | Meaning |
 |---|---|
+| `./repo · host/user/repo` | group/card header: folder path and the origin remote in compact form (shown when the repository has an `origin`) |
 | `*` (green) | the worktree you are currently in |
 | `N dirty` | uncommitted changes (yellow) |
 | `↑N` | ahead of upstream by N commits (cyan) |
@@ -73,10 +75,16 @@ lsw -bp        # + breakdown of what exactly is dirty
 
 ### Flags
 
+When nothing is found, `lsw` prints a short notice — where it looked, how deep,
+how many directories were unreadable — and exits 0. `--debug` lists skipped
+locations and per-repo errors.
+
 | Flag | Effect |
 |---|---|
 | `-b` | block/card layout with branch, remote and last commit |
 | `-p` | with `-b`: per-file dirty breakdown with +/− counts |
+| `-2`, `-3` | scan subdirectories deeper (default depth 1). Repos found deeper are labelled by their nesting path (`team/webapp`); worktrees of an already-listed repo are not duplicated |
+| `--debug` | show per-repo errors on stderr; stale/broken repos are skipped silently otherwise |
 | `--no-icons` | disable Nerd Font glyphs |
 
 Environment: `NO_COLOR` and `NO_ICONS` force plain output. Output is
@@ -86,6 +94,9 @@ ANSI-colored only in a TTY — safe to pipe into `grep`/`fzf`.
 
 - Worktrees of one repository are shown under the repository header — the
   tool recognizes linked worktrees and does not list them twice.
+- Deep scans (`-2`/`-3`) don't descend into hidden directories,
+  `node_modules` or `target`; stale worktrees (their `.git` points to a
+  vanished repository) are skipped too.
 - Nerd Font glyphs degrade gracefully without one; use `--no-icons` if you
   prefer plain ASCII.
 

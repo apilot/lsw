@@ -57,9 +57,13 @@ const ICON_FOLDER: &str = "\u{f07b}";
 const ICON_W: usize = 2;
 
 /// One display row (plain strings; coloring applied at render time).
+#[derive(Clone)]
 pub struct Row {
     /// Repository name — `Some` only in folder-scan mode.
     pub repo: Option<String>,
+    /// Origin remote in compact form (`github.com/user/repo`); shown in
+    /// group/card headers — the folder name alone isn't the repo identity.
+    pub remote: Option<String>,
     pub current: bool,
     pub branch: String,
     /// Worktree path relative to the group root (`wt/x`, `../y`, `~/z`);
@@ -73,6 +77,7 @@ pub struct Row {
 }
 
 /// Age-formatted last-commit info for block mode.
+#[derive(Clone)]
 pub struct Last {
     pub age: String,
     pub subject: String,
@@ -80,6 +85,7 @@ pub struct Last {
 
 /// One dirty file (block `-bp` mode): status letters, path and
 /// added/deleted line counts (`None` = binary or untracked).
+#[derive(Clone)]
 pub struct FileLine {
     pub letters: String,
     pub path: String,
@@ -88,7 +94,7 @@ pub struct FileLine {
 }
 
 /// Semantic state pieces; colored at render time via `seg_code`.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StateSeg {
     Bare,
     Clean,
@@ -111,6 +117,7 @@ pub fn build_row(
 ) -> Row {
     Row {
         repo: repo.map(str::to_owned),
+        remote: None,
         current,
         branch: entry.branch.clone().unwrap_or_else(|| "(detached)".to_owned()),
         subpath: subpath_of(&entry.path, root, home),
@@ -297,6 +304,9 @@ pub fn render_tree(rows: &[Row], opts: &RenderOpts) -> String {
                 String::new()
             };
             out.push_str(&paint(&format!("{BOLD}{CYAN}"), &format!("{icon}./{name}"), opts.color));
+            if let Some(remote) = rows[i].remote.as_deref() {
+                out.push_str(&paint(DIM, &format!(" · {remote}"), opts.color));
+            }
             out.push('\n');
         }
         out.push_str(&render_group(&rows[i..end], opts));
@@ -412,8 +422,16 @@ fn render_block(row: &Row, opts: &RenderOpts) -> String {
     } else {
         String::new()
     };
-    let used =
-        3 + label.chars().count() + if opts.icons { ICON_W } else { 0 } + if row.current { 2 } else { 0 } + 1;
+    let remote_seg = row
+        .remote
+        .as_deref()
+        .map(|r| paint(DIM, &format!(" · {r}"), opts.color))
+        .unwrap_or_default();
+    let used = 3 + label.chars().count()
+        + if opts.icons { ICON_W } else { 0 }
+        + if row.current { 2 } else { 0 }
+        + row.remote.as_deref().map_or(0, |r| 3 + r.chars().count())
+        + 1;
     let icon = if opts.icons {
         format!("{} ", paint(CYAN, ICON_FOLDER, opts.color))
     } else {
@@ -421,11 +439,12 @@ fn render_block(row: &Row, opts: &RenderOpts) -> String {
     };
     let fill = w.saturating_sub(used + 1).max(1);
     let mut out = format!(
-        "{}{}{}{} {}{}\n",
+        "{}{}{}{}{} {}{}\n",
         paint(DIM, "┌─ ", opts.color),
         icon,
         paint(&format!("{BOLD}{CYAN}"), &label, opts.color),
         marker,
+        remote_seg,
         paint(DIM, &"─".repeat(fill), opts.color),
         paint(DIM, "┐", opts.color),
     );
@@ -681,6 +700,7 @@ mod tests {
     fn long_branch_row(repo: Option<&str>, current: bool) -> Row {
         Row {
             repo: repo.map(str::to_owned),
+            remote: None,
             current,
             branch: "feature/ARENZAPRO-3925/3_supplier_manager_select_on_application_create"
                 .to_owned(),
@@ -779,8 +799,21 @@ mod tests {
     }
 
     #[test]
-    fn icons_render_in_headers_and_rows_and_turn_off() {
-        let rows = vec![
+    fn origin_shown_in_tree_and_block_headers() {
+        let mut row = build_row(&entry(Some("main"), "/r/api"), &status(0, 0, 0), false, Path::new("/r"), None, Some("api"));
+        row.remote = Some("github.com/apilot/lsw".to_owned());
+        let tree = render_tree(&[row.clone()], &wide_opts());
+        assert!(tree.contains("./api · github.com/apilot/lsw"), "tree header: {tree:?}");
+        let blocks = RenderOpts { width: 80, color: false, group_by_repo: true, blocks: true, icons: false };
+        let card = render_tree(&[row], &blocks);
+        let first = card.lines().next().unwrap();
+        assert!(first.contains("· github.com/apilot/lsw"), "block header: {first:?}");
+        assert!(first.ends_with('┐'), "still closed with remote");
+        assert_eq!(first.chars().count(), 79, "card width = width−1, fill shrinks for remote");
+    }
+
+    #[test]
+    fn icons_render_in_headers_and_rows_and_turn_off() {        let rows = vec![
             build_row(&entry(Some("main"), "/r/api"), &status(0, 0, 0), false, Path::new("/r"), None, Some("api")),
         ];
         let on = RenderOpts { width: 200, color: false, group_by_repo: true, blocks: false, icons: true };
