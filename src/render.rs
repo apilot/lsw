@@ -281,10 +281,10 @@ pub fn render_tree(rows: &[Row], opts: &RenderOpts) -> String {
         if !out.is_empty() {
             out.push('\n');
         }
-        let key = if opts.group_by_repo { rows[i].repo.clone() } else { None };
-        // Without grouping the whole slice is one group: rows always carry a
-        // repo name now (block labels), so a `repo == None` scan would match
-        // nothing and never advance (the single-mode hang regression).
+        // Header key: the repo name (always present since block labels).
+        // Without grouping the whole slice is one group — `end` must not
+        // depend on key matching (the single-mode hang regression).
+        let key = rows[i].repo.clone();
         let end = if opts.group_by_repo {
             i + rows[i..].iter().take_while(|r| r.repo.as_deref() == key.as_deref()).count()
         } else {
@@ -761,18 +761,21 @@ mod tests {
     }
 
     #[test]
-    fn tree_ungrouped_mode_renders_all_rows_when_repo_is_set() {
-        // Regression: since rows always carry a repo name (block labels),
-        // ungrouped rendering must not scan for repo == None (used to hang).
+    fn tree_ungrouped_mode_renders_header_and_all_rows() {
+        // Regression 1: ungrouped rendering must not scan for repo == None
+        // (used to hang). Regression 2 (owner report): single-repo mode must
+        // still show the `./repo` header — a bare `└─* main` looked like a
+        // nameless root.
         let rows = vec![
             build_row(&entry(Some("main"), "/r/crm"), &status(0, 0, 0), true, Path::new("/r/crm"), None, Some("crm")),
             build_row(&entry(Some("dev"), "/r/crm/.wt/w"), &status(1, 0, 0), false, Path::new("/r/crm"), None, None),
         ];
         let out = render_tree(&rows, &wide_opts());
         let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines.len(), 2, "both rows rendered, no header: {out:?}");
-        assert!(lines[0].starts_with("\u{251c}\u{2500}  main") || lines[0].starts_with("* main") || lines[0].contains("main"));
-        assert!(lines[1].contains("dev"));
+        assert_eq!(lines.len(), 3, "header + both rows: {out:?}");
+        assert_eq!(lines[0], "./crm", "repo header present in ungrouped mode");
+        assert!(lines[1].contains("main"));
+        assert!(lines[2].contains("dev"));
     }
 
     #[test]
