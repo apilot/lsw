@@ -32,8 +32,22 @@ fn main() {
             no_icons = true;
         } else if arg == "--debug" {
             debug = true;
-        } else if arg == "--version" || arg == "-V" {
+        } else if arg == "--version" || arg == "-V" || arg == "-v" {
             println!("lsw {}", env!("CARGO_PKG_VERSION"));
+            return;
+        } else if arg == "--help" || arg == "-h" {
+            println!("lsw {} — ls for git worktrees", env!("CARGO_PKG_VERSION"));
+            println!();
+            println!("Usage: lsw [flags] [path]");
+            println!();
+            println!("  -b        block cards with remote and last commit");
+            println!("  -p        with -b: per-file dirty breakdown (+added/−deleted)");
+            println!("  -1 -2 -3  scan plain folders N levels deep (default 1)");
+            println!("  --no-icons  disable Nerd Font glyphs");
+            println!("  --debug   show skipped/unreadable directories");
+            println!("  -v, -V    print version");
+            println!();
+            println!("NO_COLOR / NO_ICONS disable colors / glyphs.");
             return;
         } else if let Some(flags) = arg.strip_prefix('-') {
             for f in flags.chars() {

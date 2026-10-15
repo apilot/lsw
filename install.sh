@@ -47,3 +47,11 @@ case ":$PATH:" in
   *":$DEST:"*) ;;
   *) echo "note: add $DEST to your PATH to run 'lsw'" ;;
 esac
+
+# Another lsw earlier in PATH would shadow the fresh one.
+command -v lsw >/dev/null 2>&1 || true
+SHADOW=$(command -v lsw 2>/dev/null || true)
+if [ -n "$SHADOW" ] && [ "$SHADOW" != "$DEST/lsw" ]; then
+  echo "note: an existing lsw was found at $SHADOW — it may shadow this one."
+  echo "      Reinstall it from source or remove it, then run 'rehash' (zsh)."
+fi
