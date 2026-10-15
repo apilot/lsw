@@ -25,6 +25,10 @@ compose.
 ## Install
 
 ```sh
+# install script (latest prebuilt binary, x86_64-linux)
+curl -fsSL https://raw.githubusercontent.com/apilot/lsw/main/install.sh | sh
+
+# or build from source (any platform with Rust + git)
 cargo install --git https://github.com/apilot/lsw
 ```
 
@@ -34,7 +38,9 @@ or build from a local checkout:
 cargo install --path .
 ```
 
-Requires: any OS with `git` in `PATH`. Rust 1.70+ to build.
+Requires: any OS with `git` in `PATH`. Rust 1.70+ to build. The install
+script downloads a release binary, verifies its sha256 and puts `lsw`
+into `~/.local/bin` (override with `LSW_PREFIX`).
 
 ## Usage
 

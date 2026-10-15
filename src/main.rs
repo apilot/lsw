@@ -25,6 +25,9 @@ fn main() {
     for arg in env::args().skip(1) {
         if arg == "--no-icons" {
             no_icons = true;
+        } else if arg == "--version" || arg == "-V" {
+            println!("lsw {}", env!("CARGO_PKG_VERSION"));
+            return;
         } else if let Some(flags) = arg.strip_prefix('-') {
             for f in flags.chars() {
                 match f {
