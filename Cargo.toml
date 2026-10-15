@@ -1,6 +1,6 @@
 [package]
 name = "lsw"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 rust-version = "1.70"
 description = "Fast read-only list of git worktrees: branch, dirty state, ahead/behind — at a glance, across all repos in a folder"
