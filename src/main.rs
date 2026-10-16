@@ -4,7 +4,8 @@
 //! - inside a git repo → worktrees of that repo;
 //! - inside a plain folder → scan subdirectories for repos (depth 1 by
 //!   default, `-2`/`-3` deeper; nested repos labelled `dir/repo`; worktrees
-//!   of an already-listed repo are not duplicated).
+//!   nested in a listed repo are not duplicated, siblings beside it get
+//!   their own groups).
 //! Flags: `-b` block cards, `-p` per-file dirty breakdown (with `-b`),
 //! `--debug` shows per-repo errors (stale/broken repos are skipped silently).
 
@@ -189,11 +190,11 @@ pub struct Hit {
 /// repos alike (nested repos are listed with their nesting path), but skips
 /// hidden entries and heavy junk (`node_modules`, `target`).
 ///
-/// Dedup ("only the top"): a linked worktree whose real repository root is
-/// inside the scan root and already listed is skipped — its content is
-/// already shown by that repo's `git worktree list`. Worktrees whose real
-/// root is OUTSIDE the scan root stay as their own groups (sibling-worktree
-/// layouts like `crm/{api,wtx1,wtx2}` must keep working).
+/// Dedup ("only the top"): a linked worktree NESTED INSIDE an already-listed
+/// repository is skipped — its content is already shown by that repo's
+/// `git worktree list`. Sibling worktrees sitting beside the repo keep their
+/// own groups (layouts like `crm/{main,wt1,wt2}` must work; nothing may
+/// vanish regardless of sort order).
 ///
 /// Returns the hits plus human-readable notes about directories that could
 /// not be read (permissions): unreadable dirs never abort the scan. An empty
@@ -244,8 +245,8 @@ fn scan_repos(root: &Path, depth: usize) -> Result<(Vec<Hit>, Vec<String>), LswE
                     // The repository root itself, now listed: deeper worktree
                     // dirs resolving to it become duplicates.
                     listed_roots.insert(real);
-                } else if listed_roots.contains(&real) {
-                    continue; // worktree of an already-listed repo
+                } else if listed_roots.contains(&real) && key.starts_with(&real) {
+                    continue; // nested worktree of an already-listed repo
                 }
             }
         }
@@ -448,6 +449,37 @@ mod tests {
         mkrepo(&root.join("api"));
         mkworktree(&root.join("api/nested-wt"), &root.join("api"));
         assert_eq!(labels(&root, 2), vec!["api"]);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn scan_shows_sibling_worktrees_beside_listed_repo() {
+        // Main clone beside its linked worktrees, all in one folder (the
+        // owner's real layout): nothing may vanish — each sibling gets its
+        // own group, the repo root its own.
+        let root = tmpdir("sib-beside");
+        mkrepo(&root.join("main"));
+        mkworktree(&root.join("wt-a"), &root.join("main"));
+        mkworktree(&root.join("wt-b"), &root.join("main"));
+        assert_eq!(labels(&root, 1), vec!["main", "wt-a", "wt-b"]);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn scan_sibling_groups_are_order_independent() {
+        // "another_tasks" sorts before the real root "crm": a worktree that
+        // escapes the dedup by luck must not change what survives. Repro of
+        // supports/support_tasks disappearing.
+        let root = tmpdir("sib-order");
+        mkrepo(&root.join("crm"));
+        mkworktree(&root.join("another_tasks"), &root.join("crm"));
+        mkworktree(&root.join("supports"), &root.join("crm"));
+        mkworktree(&root.join("support_tasks"), &root.join("crm"));
+        // Byte-sort order: '_' (0x5F) < 's', so support_tasks precedes supports.
+        assert_eq!(
+            labels(&root, 1),
+            vec!["another_tasks", "crm", "support_tasks", "supports"]
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 

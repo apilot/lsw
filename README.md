@@ -94,8 +94,9 @@ ANSI-colored only in a TTY — safe to pipe into `grep`/`fzf`.
 
 ## Notes
 
-- Worktrees of one repository are shown under the repository header — the
-  tool recognizes linked worktrees and does not list them twice.
+- Linked worktrees are recognized: ones nested inside their repository fold
+  under its header and are not listed twice; sibling worktrees sitting
+  beside the repository get their own groups — nothing disappears.
 - Deep scans (`-2`/`-3`) don't descend into hidden directories,
   `node_modules` or `target`; stale worktrees (their `.git` points to a
   vanished repository) are skipped too.
