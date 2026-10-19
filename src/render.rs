@@ -45,6 +45,9 @@ pub struct RenderOpts {
     pub group_by_repo: bool,
     /// `-b`: one labeled card per worktree instead of the tree.
     pub blocks: bool,
+    /// `-p` with `-b`: render detail lines (per-file breakdown data and the
+    /// broken-symlink list) that the caller filled into the rows.
+    pub detail: bool,
     /// Nerd Font glyphs (repo header, branch); `--no-icons` turns off.
     pub icons: bool,
 }
@@ -70,6 +73,14 @@ pub struct Row {
     /// `None` when the worktree IS the group root (header names it).
     pub subpath: Option<String>,
     pub state: Vec<StateSeg>,
+    /// Broken symlinks in the worktree root (`-s`); 0 = unchecked or none.
+    /// Invariant: `StateSeg::BrokenLinks(broken)` sits in `state` iff
+    /// `broken > 0` and the entry is not bare.
+    pub broken: u32,
+    /// The broken symlinks themselves, sorted by name — `(name, target)`.
+    /// Invariant: `broken == broken_list.len()`; the card list lines render
+    /// in `-bps` (detail) iff this is non-empty.
+    pub broken_list: Vec<(String, String)>,
     /// Last commit (block mode): age + subject, best-effort.
     pub last: Option<Last>,
     /// Dirty-file breakdown (block `-bp` mode).
@@ -103,6 +114,7 @@ pub enum StateSeg {
     Behind(u32),
     NoUpstream,
     UpstreamGone,
+    BrokenLinks(u32),
 }
 
 /// Builds a display row from entry + status (decisions precomputed by caller).
@@ -114,14 +126,26 @@ pub fn build_row(
     root: &Path,
     home: Option<&Path>,
     repo: Option<&str>,
+    broken_list: Vec<(String, String)>,
 ) -> Row {
+    // Bare entries have no root to scan: force count/list empty so a links
+    // field can never render without its state seg (main guards !bare; this
+    // makes it structural).
+    let (broken, broken_list) =
+        if entry.bare { (0, Vec::new()) } else { (broken_list.len() as u32, broken_list) };
+    let mut state = state_segments(entry, status);
+    if broken > 0 {
+        state.push(StateSeg::BrokenLinks(broken));
+    }
     Row {
         repo: repo.map(str::to_owned),
         remote: None,
         current,
         branch: entry.branch.clone().unwrap_or_else(|| "(detached)".to_owned()),
         subpath: subpath_of(&entry.path, root, home),
-        state: state_segments(entry, status),
+        state,
+        broken,
+        broken_list,
         last: None,
         files: Vec::new(),
     }
@@ -182,6 +206,8 @@ fn seg_text(seg: &StateSeg) -> String {
         StateSeg::Behind(n) => format!("\u{2193}{n}"),
         StateSeg::NoUpstream => "no upstream".to_owned(),
         StateSeg::UpstreamGone => "upstream gone".to_owned(),
+        StateSeg::BrokenLinks(1) => "1 broken link".to_owned(),
+        StateSeg::BrokenLinks(n) => format!("{n} broken links"),
     }
 }
 
@@ -192,7 +218,7 @@ fn seg_code(seg: &StateSeg) -> &'static str {
         StateSeg::Clean => GREEN,
         StateSeg::Dirty(_) => YELLOW,
         StateSeg::Ahead(_) => CYAN,
-        StateSeg::Behind(_) | StateSeg::UpstreamGone => RED,
+        StateSeg::Behind(_) | StateSeg::UpstreamGone | StateSeg::BrokenLinks(_) => RED,
         StateSeg::NoUpstream => DIM,
     }
 }
@@ -414,7 +440,22 @@ fn render_blocks(rows: &[Row], opts: &RenderOpts) -> String {
 fn render_block(row: &Row, opts: &RenderOpts) -> String {
     // Closed box, one spare column on the right: the card never touches the
     // terminal's autowrap-prone last column and reads as a finished block.
-    let w = opts.width.saturating_sub(1).max(MIN_BLOCK_W);
+    // Long broken-symlink targets widen the card instead of spilling over
+    // the right border (list lines render in detail mode only, but the
+    // width must hold whenever they do).
+    let links_w = if opts.detail {
+        row.broken_list
+            .iter()
+            .map(|(name, target)| {
+                // │ + space + label column + name + " -> " + target + pad(≥1) + │
+                2 + 1 + LABEL_W + name.chars().count() + 4 + target.chars().count() + 1
+            })
+            .max()
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let w = opts.width.saturating_sub(1).max(MIN_BLOCK_W).max(links_w);
     let budget = w.saturating_sub(2 + LABEL_W + 1);
     let label = block_label(row);
     let marker = if row.current {
@@ -448,7 +489,7 @@ fn render_block(row: &Row, opts: &RenderOpts) -> String {
         paint(DIM, &"─".repeat(fill), opts.color),
         paint(DIM, "┐", opts.color),
     );
-    for (name, lines) in block_fields(row, budget, opts.color) {
+    for (name, lines) in block_fields(row, budget, opts.color, opts.detail) {
         for (i, line) in lines.iter().enumerate() {
             let content = if i == 0 {
                 format!(" {:<6}  {line}", name)
@@ -484,9 +525,10 @@ fn block_label(row: &Row) -> String {
     }
 }
 
-/// Labeled field lines (branch / status / remote / last). Branch and
-/// last wrap at the value column; status/remote are short single-liners.
-fn block_fields(row: &Row, budget: usize, color: bool) -> Vec<(&'static str, Vec<String>)> {
+/// Labeled field lines (branch / status / remote / links / last). Branch and
+/// last wrap at the value column; status/remote/links are short single-liners
+/// (links gains one continuation line per broken symlink in detail mode).
+fn block_fields(row: &Row, budget: usize, color: bool, detail: bool) -> Vec<(&'static str, Vec<String>)> {
     let mut fields = vec![(
         "branch",
         char_chunks(&row.branch, budget)
@@ -504,7 +546,13 @@ fn block_fields(row: &Row, budget: usize, color: bool) -> Vec<(&'static str, Vec
         }
         fields.push(("status", lines));
     }
-    let remote: Vec<_> = row.state.iter().skip(1).collect();
+    let remote: Vec<_> = row
+        .state
+        .iter()
+        .skip(1)
+        // Broken links get their own card field below — not remote state.
+        .filter(|s| !matches!(s, StateSeg::BrokenLinks(_)))
+        .collect();
     if !remote.is_empty() {
         let text = remote
             .iter()
@@ -512,6 +560,13 @@ fn block_fields(row: &Row, budget: usize, color: bool) -> Vec<(&'static str, Vec
             .collect::<Vec<_>>()
             .join(", ");
         fields.push(("remote", vec![text]));
+    }
+    if row.broken > 0 {
+        let mut lines = vec![paint(RED, &format!("{} broken", row.broken), color)];
+        if detail && !row.broken_list.is_empty() {
+            lines.extend(broken_link_lines(&row.broken_list, color));
+        }
+        fields.push(("links", lines));
     }
     if let Some(last) = &row.last {
         let plain = format!("{} · {}", last.age, last.subject);
@@ -547,6 +602,15 @@ fn visible_len(s: &str) -> usize {
         }
     }
     n
+}
+
+/// Broken-symlink list lines under the `links` count (`-bps`):
+/// `name -> target`, name plain, arrow and target dim.
+fn broken_link_lines(links: &[(String, String)], color: bool) -> Vec<String> {
+    links
+        .iter()
+        .map(|(name, target)| format!("{name}{}", paint(DIM, &format!(" -> {target}"), color)))
+        .collect()
 }
 
 /// Per-file continuation lines under the `status` field (`-bp`):
@@ -617,7 +681,7 @@ mod tests {
     }
 
     fn wide_opts() -> RenderOpts {
-        RenderOpts { width: 200, color: false, group_by_repo: false, blocks: false, icons: false }
+        RenderOpts { width: 200, color: false, group_by_repo: false, blocks: false, icons: false, detail: false }
     }
 
     // ── state segments ────────────────────────────────────────────────
@@ -673,13 +737,14 @@ mod tests {
             Path::new("/r"),
             None,
             None,
+            Vec::new(),
         );
         assert_eq!(row.branch, "(detached)");
         assert_eq!(row.subpath.as_deref(), Some(".wt/x"));
         assert!(row.current);
         // The root worktree itself has no tail path — header names it.
         let root_row =
-            build_row(&entry(Some("main"), "/r"), &WorktreeStatus::default(), false, Path::new("/r"), None, None);
+            build_row(&entry(Some("main"), "/r"), &WorktreeStatus::default(), false, Path::new("/r"), None, None, Vec::new());
         assert_eq!(root_row.subpath, None);
     }
 
@@ -706,6 +771,8 @@ mod tests {
                 .to_owned(),
             subpath: Some("support_tasks/.wt/x".to_owned()),
             state: vec![StateSeg::Dirty(3), StateSeg::Ahead(3)],
+            broken: 0,
+            broken_list: Vec::new(),
             last: None,
             files: Vec::new(),
         }
@@ -714,9 +781,9 @@ mod tests {
     #[test]
     fn tree_connectors_marker_and_single_lines() {
         let rows = vec![
-            build_row(&entry(Some("develop"), "/r"), &status(0, 0, 1), true, Path::new("/r"), None, None),
+            build_row(&entry(Some("develop"), "/r"), &status(0, 0, 1), true, Path::new("/r"), None, None, Vec::new()),
             long_branch_row(None, false),
-            build_row(&entry(Some("staging"), "/r/.wt/s"), &status(1, 0, 11), false, Path::new("/r"), None, None),
+            build_row(&entry(Some("staging"), "/r/.wt/s"), &status(1, 0, 11), false, Path::new("/r"), None, None, Vec::new()),
         ];
         let out = render_tree(&rows, &wide_opts());
         let lines: Vec<&str> = out.lines().collect();
@@ -731,9 +798,9 @@ mod tests {
     #[test]
     fn tree_aligns_state_column_for_single_lines() {
         let rows = vec![
-            build_row(&entry(Some("develop"), "/r"), &status(0, 0, 0), false, Path::new("/r"), None, None),
+            build_row(&entry(Some("develop"), "/r"), &status(0, 0, 0), false, Path::new("/r"), None, None, Vec::new()),
             long_branch_row(None, false),
-            build_row(&entry(Some("staging"), "/r/.wt/s"), &status(1, 0, 0), false, Path::new("/r"), None, None),
+            build_row(&entry(Some("staging"), "/r/.wt/s"), &status(1, 0, 0), false, Path::new("/r"), None, None, Vec::new()),
         ];
         let out = render_tree(&rows, &wide_opts());
         let lines: Vec<&str> = out.lines().collect();
@@ -745,11 +812,11 @@ mod tests {
     #[test]
     fn tree_wraps_long_branch_into_two_lines() {
         let rows = vec![
-            build_row(&entry(Some("develop"), "/r"), &status(0, 0, 0), false, Path::new("/r"), None, None),
+            build_row(&entry(Some("develop"), "/r"), &status(0, 0, 0), false, Path::new("/r"), None, None, Vec::new()),
             long_branch_row(None, false),
-            build_row(&entry(Some("staging"), "/r/.wt/s"), &status(1, 0, 0), false, Path::new("/r"), None, None),
+            build_row(&entry(Some("staging"), "/r/.wt/s"), &status(1, 0, 0), false, Path::new("/r"), None, None, Vec::new()),
         ];
-        let opts = RenderOpts { width: 80, color: false, group_by_repo: false, blocks: false, icons: false };
+        let opts = RenderOpts { width: 80, color: false, group_by_repo: false, blocks: false, icons: false, detail: false };
         let out = render_tree(&rows, &opts);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 4, "long branch row takes two lines");
@@ -757,8 +824,8 @@ mod tests {
         assert!(lines[2].starts_with("\u{2502}   3 dirty"));
         assert!(lines[2].ends_with("· support_tasks/.wt/x"));
         // Last row wraps too (short branch, but width budget shared): continuation is blank.
-        let last_opts = RenderOpts { width: 10, color: false, group_by_repo: false, blocks: false, icons: false };
-        let solo = vec![build_row(&entry(Some("m"), "/r"), &status(0, 0, 0), false, Path::new("/r"), None, None)];
+        let last_opts = RenderOpts { width: 10, color: false, group_by_repo: false, blocks: false, icons: false, detail: false };
+        let solo = vec![build_row(&entry(Some("m"), "/r"), &status(0, 0, 0), false, Path::new("/r"), None, None, Vec::new())];
         let solo_out = render_tree(&solo, &last_opts);
         let solo_lines: Vec<&str> = solo_out.lines().collect();
         assert_eq!(solo_lines.len(), 2);
@@ -768,10 +835,10 @@ mod tests {
     #[test]
     fn tree_scan_mode_group_headers_and_blank_lines() {
         let rows = vec![
-            build_row(&entry(Some("main"), "/r/api"), &status(0, 0, 0), false, Path::new("/r"), None, Some("api")),
-            build_row(&entry(Some("dev"), "/r/web"), &status(0, 0, 0), false, Path::new("/r"), None, Some("web")),
+            build_row(&entry(Some("main"), "/r/api"), &status(0, 0, 0), false, Path::new("/r"), None, Some("api"), Vec::new()),
+            build_row(&entry(Some("dev"), "/r/web"), &status(0, 0, 0), false, Path::new("/r"), None, Some("web"), Vec::new()),
         ];
-        let opts = RenderOpts { width: 200, color: false, group_by_repo: true, blocks: false, icons: false };
+        let opts = RenderOpts { width: 200, color: false, group_by_repo: true, blocks: false, icons: false, detail: false };
         let out = render_tree(&rows, &opts);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines[0], "./api");
@@ -787,8 +854,8 @@ mod tests {
         // still show the `./repo` header — a bare `└─* main` looked like a
         // nameless root.
         let rows = vec![
-            build_row(&entry(Some("main"), "/r/crm"), &status(0, 0, 0), true, Path::new("/r/crm"), None, Some("crm")),
-            build_row(&entry(Some("dev"), "/r/crm/.wt/w"), &status(1, 0, 0), false, Path::new("/r/crm"), None, None),
+            build_row(&entry(Some("main"), "/r/crm"), &status(0, 0, 0), true, Path::new("/r/crm"), None, Some("crm"), Vec::new()),
+            build_row(&entry(Some("dev"), "/r/crm/.wt/w"), &status(1, 0, 0), false, Path::new("/r/crm"), None, None, Vec::new()),
         ];
         let out = render_tree(&rows, &wide_opts());
         let lines: Vec<&str> = out.lines().collect();
@@ -800,11 +867,11 @@ mod tests {
 
     #[test]
     fn origin_shown_in_tree_and_block_headers() {
-        let mut row = build_row(&entry(Some("main"), "/r/api"), &status(0, 0, 0), false, Path::new("/r"), None, Some("api"));
+        let mut row = build_row(&entry(Some("main"), "/r/api"), &status(0, 0, 0), false, Path::new("/r"), None, Some("api"), Vec::new());
         row.remote = Some("github.com/apilot/lsw".to_owned());
         let tree = render_tree(&[row.clone()], &wide_opts());
         assert!(tree.contains("./api · github.com/apilot/lsw"), "tree header: {tree:?}");
-        let blocks = RenderOpts { width: 80, color: false, group_by_repo: true, blocks: true, icons: false };
+        let blocks = RenderOpts { width: 80, color: false, group_by_repo: true, blocks: true, icons: false, detail: false };
         let card = render_tree(&[row], &blocks);
         let first = card.lines().next().unwrap();
         assert!(first.contains("· github.com/apilot/lsw"), "block header: {first:?}");
@@ -814,13 +881,13 @@ mod tests {
 
     #[test]
     fn icons_render_in_headers_and_rows_and_turn_off() {        let rows = vec![
-            build_row(&entry(Some("main"), "/r/api"), &status(0, 0, 0), false, Path::new("/r"), None, Some("api")),
+            build_row(&entry(Some("main"), "/r/api"), &status(0, 0, 0), false, Path::new("/r"), None, Some("api"), Vec::new()),
         ];
-        let on = RenderOpts { width: 200, color: false, group_by_repo: true, blocks: false, icons: true };
+        let on = RenderOpts { width: 200, color: false, group_by_repo: true, blocks: false, icons: true, detail: false };
         let out = render_tree(&rows, &on);
         assert!(out.contains("\u{f07b}"), "folder icon on repo header");
         assert!(out.contains("\u{e0a0}"), "branch icon on row");
-        let off_opts = RenderOpts { width: 200, color: false, group_by_repo: true, blocks: false, icons: false };
+        let off_opts = RenderOpts { width: 200, color: false, group_by_repo: true, blocks: false, icons: false, detail: false };
         let plain = render_tree(&rows, &off_opts);
         assert!(!plain.contains('\u{f07b}') && !plain.contains('\u{e0a0}'), "icons off → ascii only");
     }
@@ -828,9 +895,9 @@ mod tests {
     #[test]
     fn block_header_carries_folder_icon() {
         let rows = vec![build_row(
-            &entry(Some("main"), "/r/api"), &status(0, 0, 0), false, Path::new("/r"), None, Some("api"),
+            &entry(Some("main"), "/r/api"), &status(0, 0, 0), false, Path::new("/r"), None, Some("api"), Vec::new(),
         )];
-        let on = RenderOpts { width: 60, color: false, group_by_repo: true, blocks: true, icons: true };
+        let on = RenderOpts { width: 60, color: false, group_by_repo: true, blocks: true, icons: true, detail: false };
         let out = render_tree(&rows, &on);
         let first = out.lines().next().unwrap();
         assert!(first.starts_with("┌─ \u{f07b} ./api"), "header: {first:?}");
@@ -840,7 +907,7 @@ mod tests {
     #[test]
     fn icon_width_counts_toward_fit() {
         // Same row: fits at 24 without icons, wraps with icons (+2 chars).
-        let row = build_row(&entry(Some("m"), "/r"), &status(0, 0, 0), false, Path::new("/r"), None, None);
+        let row = build_row(&entry(Some("m"), "/r"), &status(0, 0, 0), false, Path::new("/r"), None, None, Vec::new());
         assert!(fits_one_line(&row, 13, false));
         assert!(!fits_one_line(&row, 13, true));
     }
@@ -850,9 +917,9 @@ mod tests {
     #[test]
     fn tree_colors_are_semantic_ansi() {
         let rows = vec![
-            build_row(&entry(Some("develop"), "/r"), &status(0, 1, 2), true, Path::new("/r"), None, None),
+            build_row(&entry(Some("develop"), "/r"), &status(0, 1, 2), true, Path::new("/r"), None, None, Vec::new()),
         ];
-        let opts = RenderOpts { width: 200, color: true, group_by_repo: false, blocks: false, icons: false };
+        let opts = RenderOpts { width: 200, color: true, group_by_repo: false, blocks: false, icons: false, detail: false };
         let out = render_tree(&rows, &opts);
         assert!(out.contains(GREEN), "marker/clean green");
         assert!(out.contains(CYAN), "ahead cyan");
@@ -862,7 +929,7 @@ mod tests {
 
     #[test]
     fn tree_no_color_is_plain() {
-        let rows = vec![build_row(&entry(Some("m"), "/r"), &status(2, 0, 0), false, Path::new("/r"), None, None)];
+        let rows = vec![build_row(&entry(Some("m"), "/r"), &status(2, 0, 0), false, Path::new("/r"), None, None, Vec::new())];
         assert!(!render_tree(&rows, &wide_opts()).contains('\x1b'));
     }
 
@@ -894,6 +961,7 @@ mod tests {
             Path::new("/w/crm"),
             None,
             Some("crm"),
+            Vec::new(),
         );
         row.last = Some(Last { age: "2h".to_owned(), subject: "fix core".to_owned() });
         row.files = vec![
@@ -915,7 +983,7 @@ mod tests {
 
     #[test]
     fn block_card_layout_fields_and_width() {
-        let opts = RenderOpts { width: 60, color: false, group_by_repo: true, blocks: true, icons: false };
+        let opts = RenderOpts { width: 60, color: false, group_by_repo: true, blocks: true, icons: false, detail: false };
         let out = render_tree(&[dirty_row()], &opts);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 8, "header + 4 fields (status has 3 lines) + footer");
@@ -935,7 +1003,7 @@ mod tests {
 
     #[test]
     fn block_cards_separated_by_blank_line() {
-        let opts = RenderOpts { width: 60, color: false, group_by_repo: true, blocks: true, icons: false };
+        let opts = RenderOpts { width: 60, color: false, group_by_repo: true, blocks: true, icons: false, detail: false };
         let mut second = dirty_row();
         second.repo = Some("web".to_owned());
         let out = render_tree(&[dirty_row(), second], &opts);
@@ -946,7 +1014,7 @@ mod tests {
 
     #[test]
     fn block_wraps_long_branch_at_value_column() {
-        let opts = RenderOpts { width: 30, color: false, group_by_repo: true, blocks: true, icons: false };
+        let opts = RenderOpts { width: 30, color: false, group_by_repo: true, blocks: true, icons: false, detail: false };
         let out = render_tree(&[dirty_row()], &opts);
         let lines: Vec<&str> = out.lines().collect();
         assert!(lines[1].starts_with("│ branch  feature/AREN-1/do_"), "wrapped at budget 18");
@@ -956,7 +1024,7 @@ mod tests {
 
     #[test]
     fn block_colors_are_semantic() {
-        let opts = RenderOpts { width: 60, color: true, group_by_repo: true, blocks: true, icons: false };
+        let opts = RenderOpts { width: 60, color: true, group_by_repo: true, blocks: true, icons: false, detail: false };
         let out = render_tree(&[dirty_row()], &opts);
         assert!(out.contains(&format!("{BOLD}{CYAN}")), "header bold cyan");
         assert!(out.contains(YELLOW), "dirty yellow");
@@ -975,7 +1043,7 @@ mod tests {
                 deleted: Some(0),
             })
             .collect();
-        let opts = RenderOpts { width: 80, color: false, group_by_repo: true, blocks: true, icons: false };
+        let opts = RenderOpts { width: 80, color: false, group_by_repo: true, blocks: true, icons: false, detail: false };
         let out = render_tree(&[row], &opts);
         assert!(out.contains("… +3 more"), "13 files − 10 shown = 3 more");
     }
@@ -996,5 +1064,152 @@ mod tests {
         assert_eq!(visible_len("plain"), 5);
         assert_eq!(visible_len("\x1b[1mabc\x1b[0m"), 3);
         assert_eq!(visible_len("a\x1b[31;1mb\nc"), 4, "each char counts, incl newline");
+    }
+
+    // ── broken symlinks (`-s`) ────────────────────────────────────────
+
+    #[test]
+    fn broken_links_seg_text_and_color() {
+        assert_eq!(seg_text(&StateSeg::BrokenLinks(1)), "1 broken link");
+        assert_eq!(seg_text(&StateSeg::BrokenLinks(2)), "2 broken links");
+        assert_eq!(seg_code(&StateSeg::BrokenLinks(2)), RED);
+    }
+
+    #[test]
+    fn build_row_appends_broken_seg_only_when_positive_and_not_bare() {
+        let row = build_row(
+            &entry(Some("main"), "/r"), &status(0, 0, 0), false, Path::new("/r"), None, None,
+            vec![("a".to_owned(), "x".to_owned()), ("b".to_owned(), "y".to_owned())],
+        );
+        assert_eq!(row.broken, 2);
+        assert_eq!(row.state.last(), Some(&StateSeg::BrokenLinks(2)), "seg after existing state segs");
+        let zero = build_row(
+            &entry(Some("main"), "/r"), &status(0, 0, 0), false, Path::new("/r"), None, None, Vec::new(),
+        );
+        assert_eq!(zero.broken, 0);
+        assert!(!zero.state.iter().any(|s| matches!(s, StateSeg::BrokenLinks(_))));
+        let bare = WorktreeEntry { path: PathBuf::from("/r"), branch: None, bare: true };
+        let bare_row = build_row(&bare, &WorktreeStatus::default(), false, Path::new("/r"), None, None, vec![("x".to_owned(), "y".to_owned())]);
+        assert_eq!(bare_row.state, vec![StateSeg::Bare], "bare: never a broken seg");
+        assert_eq!(bare_row.broken, 0, "bare: count forced to 0");
+        assert!(bare_row.broken_list.is_empty(), "bare: list forced empty");
+    }
+
+    #[test]
+    fn tree_tail_shows_broken_links_token() {
+        let rows = vec![build_row(
+            &entry(Some("main"), "/r"), &status(0, 0, 0), false, Path::new("/r"), None, None,
+            vec![("a".to_owned(), "x".to_owned()), ("b".to_owned(), "y".to_owned())],
+        )];
+        let out = render_tree(&rows, &wide_opts());
+        assert!(out.contains("clean, 2 broken links"), "tree tail: {out:?}");
+    }
+
+    #[test]
+    fn block_card_links_field_after_remote_not_merged_into_it() {
+        let row = build_row(
+            &entry(Some("main"), "/r"), &status(0, 1, 2), false, Path::new("/r"), None, None,
+            vec![("a".to_owned(), "x".to_owned()), ("b".to_owned(), "y".to_owned())],
+        );
+        let plain = RenderOpts { width: 80, color: false, group_by_repo: false, blocks: true, icons: false, detail: false };
+        let out = render_tree(&[row.clone()], &plain);
+        let lines: Vec<&str> = out.lines().collect();
+        let remote = lines.iter().position(|l| l.starts_with("│ remote")).expect("remote field present");
+        let links = lines.iter().position(|l| l.starts_with("│ links   2 broken")).expect("links field present");
+        assert!(remote < links, "links card field comes after remote");
+        assert!(lines[remote].contains("↑1, ↓2"), "remote keeps upstream text: {:?}", lines[remote]);
+        assert!(!lines[remote].contains("broken"), "broken must not leak into remote: {:?}", lines[remote]);
+        let colored = RenderOpts { width: 80, color: true, group_by_repo: false, blocks: true, icons: false, detail: false };
+        let colored_out = render_tree(&[row], &colored);
+        assert!(colored_out.contains(&format!("{RED}2 broken{RESET}")), "links value red: {colored_out:?}");
+    }
+
+    #[test]
+    fn block_card_without_broken_has_no_links_field() {
+        let row = build_row(
+            &entry(Some("main"), "/r"), &status(0, 0, 0), false, Path::new("/r"), None, None, Vec::new(),
+        );
+        let opts = RenderOpts { width: 80, color: false, group_by_repo: false, blocks: true, icons: false, detail: false };
+        let out = render_tree(&[row], &opts);
+        assert!(!out.lines().any(|l| l.starts_with("│ links")), "no links field when broken = 0");
+    }
+
+    #[test]
+    fn block_detail_mode_without_broken_has_no_links_field() {
+        // `-bp` without `-s`: detail rendering active, but nothing scanned.
+        let row = build_row(
+            &entry(Some("main"), "/r"), &status(0, 0, 0), false, Path::new("/r"), None, None, Vec::new(),
+        );
+        let opts = RenderOpts { width: 80, color: false, group_by_repo: false, blocks: true, icons: false, detail: true };
+        let out = render_tree(&[row], &opts);
+        assert!(!out.lines().any(|l| l.starts_with("│ links")), "no links field without -s");
+    }
+
+    // ── broken symlink list (`-bps`) ──────────────────────────────────
+
+    /// Pre-sorted like `git::broken_symlinks_of` returns it.
+    fn broken_list_row() -> Row {
+        build_row(
+            &entry(Some("main"), "/r"), &status(0, 0, 0), false, Path::new("/r"), None, None,
+            vec![
+                (".env.local".to_owned(), "/mnt/secrets/app.env".to_owned()),
+                ("vendor".to_owned(), "/opt/cuda-12.4".to_owned()),
+            ],
+        )
+    }
+
+    #[test]
+    fn block_detail_lists_broken_links_under_count() {
+        let opts = RenderOpts { width: 80, color: false, group_by_repo: false, blocks: true, icons: false, detail: true };
+        let out = render_tree(&[broken_list_row()], &opts);
+        let lines: Vec<&str> = out.lines().collect();
+        let links = lines.iter().position(|l| l.starts_with("│ links   2 broken")).expect("count line");
+        assert!(
+            lines[links + 1].starts_with("│         .env.local -> /mnt/secrets/app.env"),
+            "{:?}",
+            lines[links + 1]
+        );
+        assert!(
+            lines[links + 2].starts_with("│         vendor -> /opt/cuda-12.4"),
+            "{:?}",
+            lines[links + 2]
+        );
+        let value_col = lines[links].find("2 broken").unwrap();
+        let entry_col = lines[links + 1].find(".env.local").unwrap();
+        assert_eq!(value_col, entry_col, "entries align under the count value");
+    }
+
+    #[test]
+    fn block_without_detail_keeps_count_only() {
+        let opts = RenderOpts { width: 80, color: false, group_by_repo: false, blocks: true, icons: false, detail: false };
+        let out = render_tree(&[broken_list_row()], &opts);
+        assert!(out.contains("│ links   2 broken"), "count stays: {out:?}");
+        assert!(!out.contains(".env.local") && !out.contains("-> "), "no list lines without -p");
+    }
+
+    #[test]
+    fn broken_link_target_is_dim() {
+        let colored = broken_link_lines(&[("v".to_owned(), "/opt/x".to_owned())], true);
+        assert_eq!(colored[0], format!("v{DIM} -> /opt/x{RESET}"));
+        let plain = broken_link_lines(&[("v".to_owned(), "/opt/x".to_owned())], false);
+        assert_eq!(plain[0], "v -> /opt/x");
+    }
+
+    #[test]
+    fn long_broken_target_widens_card() {
+        let long = "/mnt/very/long/path/to/external/library/exceeding-normal-card-width";
+        let row = build_row(
+            &entry(Some("m"), "/r"), &status(0, 0, 0), false, Path::new("/r"), None, None,
+            vec![("vendor".to_owned(), long.to_owned())],
+        );
+        let opts = RenderOpts { width: 60, color: false, group_by_repo: false, blocks: true, icons: false, detail: true };
+        let out = render_tree(&[row], &opts);
+        let lines: Vec<&str> = out.lines().collect();
+        let widths: std::collections::HashSet<usize> =
+            lines.iter().map(|l| l.chars().count()).collect();
+        assert_eq!(widths.len(), 1, "all borders aligned: {widths:?}");
+        let w = *widths.iter().next().unwrap();
+        assert!(w > 59, "card widened beyond default width−1: {w}");
+        assert!(lines.iter().any(|l| l.contains(long)), "target fully visible");
     }
 }

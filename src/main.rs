@@ -24,6 +24,7 @@ use parse::WorktreeStatus;
 fn main() {
     let mut blocks = false;
     let mut print_files = false;
+    let mut symlinks = false;
     let mut no_icons = false;
     let mut debug = false;
     let mut depth = 1usize;
@@ -42,7 +43,8 @@ fn main() {
             println!("Usage: lsw [flags] [path]");
             println!();
             println!("  -b        block cards with branch, status and remote");
-            println!("  -p        with -b: per-file dirty breakdown (+added/−deleted) and last commit");
+            println!("  -p        with -b: per-file dirty breakdown (+added/−deleted), last commit (+broken symlink list with -s)");
+            println!("  -s        report broken top-level symlinks in worktree roots");
             println!("  -1 -2 -3  scan plain folders N levels deep (default 1)");
             println!("  --no-icons  disable Nerd Font glyphs");
             println!("  --debug   show skipped/unreadable directories");
@@ -55,6 +57,7 @@ fn main() {
                 match f {
                     'b' => blocks = true,
                     'p' => print_files = true,
+                    's' => symlinks = true,
                     '1' | '2' | '3' => depth = f.to_digit(10).unwrap() as usize,
                     '4'..='9' => {
                         eprintln!("lsw: scan depth -{f} not supported (max -3)");
@@ -70,7 +73,7 @@ fn main() {
             target = arg;
         }
     }
-    if let Err(err) = run(Path::new(&target), blocks, print_files, no_icons, depth, debug) {
+    if let Err(err) = run(Path::new(&target), blocks, print_files, symlinks, no_icons, depth, debug) {
         eprintln!("lsw: {err}");
         std::process::exit(1);
     }
@@ -80,6 +83,7 @@ fn run(
     target: &Path,
     blocks: bool,
     print_files: bool,
+    symlinks: bool,
     no_icons: bool,
     depth: usize,
     debug: bool,
@@ -103,7 +107,7 @@ fn run(
     let mut errors = Vec::new();
     for Hit { path: repo, label: name } in &repos {
         let remote = git::remote_of(repo).map(|url| git::short_remote(&url));
-        match collect_repo_rows(repo, &current_dir, home.as_deref(), blocks && print_files) {
+        match collect_repo_rows(repo, &current_dir, home.as_deref(), blocks && print_files, symlinks) {
             Ok(mut repo_rows) => {
                 // Name + origin in BOTH modes: scan mode → group header,
                 // single mode → card label (`./name` instead of bare `./`).
@@ -147,8 +151,14 @@ fn run(
     }
     let icons = !no_icons && env::var_os("NO_ICONS").is_none();
     // Width budget = terminal minus the 4-space indent shift, so no line wraps.
-    let opts =
-        render::RenderOpts { width: terminal_width().saturating_sub(4), color, group_by_repo: scan_mode, blocks, icons };
+    let opts = render::RenderOpts {
+        width: terminal_width().saturating_sub(4),
+        color,
+        group_by_repo: scan_mode,
+        blocks,
+        icons,
+        detail: blocks && print_files,
+    };
     let out = render::render_tree(&rows, &opts);
     // Whole-output shift: the listing reads as belonging to the program.
     print!("{}", render::indent(&out, 4));
@@ -306,12 +316,14 @@ fn stale_worktree(dir: &Path) -> bool {
 /// subtree: the root worktree itself plus worktrees nested inside it
 /// (`wt/...`). Sibling worktrees of the shared repo are the other scan
 /// groups' business — the owner wants only "what lives here".
-/// `detail` (`-bp`) fills `last` and the per-file dirty breakdown.
+/// `detail` (`-bp`) fills `last` and the per-file dirty breakdown;
+/// `symlinks` (`-s`) counts broken top-level symlinks per non-bare entry.
 fn collect_repo_rows(
     repo: &Path,
     current_dir: &Path,
     home: Option<&Path>,
     detail: bool,
+    symlinks: bool,
 ) -> Result<Vec<render::Row>, LswError> {
     let entries = git::list_worktrees(repo)?;
     let mut rows = Vec::with_capacity(entries.len());
@@ -329,7 +341,12 @@ fn collect_repo_rows(
             .canonicalize()
             .map(|p| p == current_dir)
             .unwrap_or(false);
-        let mut row = render::build_row(entry, &status, current, repo, home, None);
+        // `-s`: top-level broken-symlink scan, only for real worktrees —
+        // bare entries have no root to scan; empty keeps default runs
+        // unchanged. One call feeds both the count and the name list.
+        let broken_list =
+            if symlinks && !entry.bare { git::broken_symlinks_of(&entry.path) } else { Vec::new() };
+        let mut row = render::build_row(entry, &status, current, repo, home, None, broken_list);
         if detail && !entry.bare {
             row.last = git::last_commit(&entry.path).map(|(ts, subject)| {
                 let now = std::time::SystemTime::now()

@@ -1,5 +1,6 @@
 //! The only module that talks to the `git` binary (I/O boundary).
 
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -96,6 +97,38 @@ pub fn remote_of(repo: &Path) -> Option<String> {
         .filter(|url| !url.is_empty())
 }
 
+/// Broken symlinks among the TOP-LEVEL entries of a worktree root (`-s`),
+/// as `(name, target)` pairs sorted by name (read_dir order is arbitrary;
+/// deterministic output for tests and listing alike). A broken symlink is
+/// an entry whose target cannot be resolved. One `read_dir`, no recursion;
+/// hidden entries included, `.git` skipped by name (never a useful signal,
+/// often the heaviest stat). The entry type comes straight from the dirent
+/// (`d_type`) — `fs::metadata` runs only for actual symlinks. Best-effort —
+/// an unreadable directory yields an empty list, never fails the listing.
+pub fn broken_symlinks_of(worktree: &Path) -> Vec<(String, String)> {
+    let Ok(entries) = fs::read_dir(worktree) else { return Vec::new() };
+    let mut broken = Vec::new();
+    for entry in entries.flatten() {
+        if entry.file_name() == ".git" {
+            continue;
+        }
+        // DirEntry::file_type does not follow symlinks (d_type; falls back
+        // to one symlink_metadata call where the fs lacks d_type).
+        let is_symlink = entry.file_type().map(|t| t.is_symlink()).unwrap_or(false);
+        if is_symlink && fs::metadata(entry.path()).is_err() {
+            // TOCTOU: the link may vanish between metadata and read_link —
+            // skip rather than render a dangling arrow (`name -> `).
+            let Ok(target) = fs::read_link(entry.path()) else { continue };
+            broken.push((
+                entry.file_name().to_string_lossy().into_owned(),
+                target.to_string_lossy().into_owned(),
+            ));
+        }
+    }
+    broken.sort_by(|a, b| a.0.cmp(&b.0));
+    broken
+}
+
 /// Compact display form of a remote URL: `git@github.com:apilot/lsw.git`,
 /// `https://github.com/apilot/lsw.git` and `ssh://git@github.com/a/b` all
 /// become `github.com/apilot/lsw`. Anything else passes through trimmed
@@ -118,7 +151,16 @@ pub fn short_remote(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::short_remote;
+    use super::{broken_symlinks_of, short_remote};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn tmpdir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("lsw-git-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
 
     #[test]
     fn short_remote_normalizes_common_url_forms() {
@@ -127,5 +169,72 @@ mod tests {
         assert_eq!(short_remote("http://gitlab.corp/team/proj/"), "gitlab.corp/team/proj");
         assert_eq!(short_remote("ssh://git@host.tld/x/y.git"), "host.tld/x/y");
         assert_eq!(short_remote("/srv/git/lsw"), "/srv/git/lsw");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_symlink_counted() {
+        let root = tmpdir("broken");
+        std::os::unix::fs::symlink("gone-target", root.join("bad")).unwrap();
+        assert_eq!(broken_symlinks_of(&root), vec![("bad".to_owned(), "gone-target".to_owned())]);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn valid_symlink_not_counted() {
+        let root = tmpdir("valid");
+        fs::write(root.join("real.txt"), "x").unwrap();
+        std::os::unix::fs::symlink("real.txt", root.join("good")).unwrap();
+        assert!(broken_symlinks_of(&root).is_empty());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn regular_file_not_counted() {
+        let root = tmpdir("regular");
+        fs::write(root.join("file.txt"), "x").unwrap();
+        assert!(broken_symlinks_of(&root).is_empty());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hidden_broken_symlink_counted() {
+        let root = tmpdir("hidden");
+        std::os::unix::fs::symlink("gone", root.join(".env")).unwrap();
+        assert_eq!(broken_symlinks_of(&root), vec![(".env".to_owned(), "gone".to_owned())]);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_name_skipped() {
+        // `.git` is skipped by name — even a broken symlink named `.git`.
+        let root = tmpdir("gitname");
+        std::os::unix::fs::symlink("nowhere", root.join(".git")).unwrap();
+        assert!(broken_symlinks_of(&root).is_empty());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn two_broken_symlinks_counted_and_sorted() {
+        // Created b-before-a on purpose: output must be sorted by name
+        // (read_dir order is arbitrary).
+        let root = tmpdir("two-broken");
+        std::os::unix::fs::symlink("gone-b", root.join("b")).unwrap();
+        std::os::unix::fs::symlink("gone-a", root.join("a")).unwrap();
+        assert_eq!(
+            broken_symlinks_of(&root),
+            vec![("a".to_owned(), "gone-a".to_owned()), ("b".to_owned(), "gone-b".to_owned())]
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn missing_dir_counts_zero() {
+        // Best-effort: unreadable/missing root never fails the listing.
+        assert!(broken_symlinks_of(Path::new("/nonexistent/lsw-test")).is_empty());
     }
 }
