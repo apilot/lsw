@@ -54,8 +54,9 @@ lsw -bp        # + breakdown of what exactly is dirty
 lsw -2         # tree view, scanning subdirectories two levels deep
 ```
 
-`-b` adds the remote tracking branch and the last commit;
-`-bp` spells out the dirty state file by file, with +added/−deleted counts:
+`-b` switches to block cards with the remote tracking branch;
+`-bp` spells out the dirty state file by file, with +added/−deleted counts,
+and adds the last commit:
 
 <p align="center"><img src="assets/blocks.png" alt="lsw -b — block view" width="720"></p>
 <p align="center"><img src="assets/detail.png" alt="lsw -bp — per-file dirty breakdown" width="720"></p>
@@ -65,8 +66,10 @@ lsw -2         # tree view, scanning subdirectories two levels deep
 | Token | Meaning |
 |---|---|
 | `./repo · host/user/repo` | group/card header: folder path and the origin remote in compact form (shown when the repository has an `origin`) |
+| `· .wt/name` | directory of a linked worktree nested inside the repository |
 | `*` (green) | the worktree you are currently in |
 | `N dirty` | uncommitted changes (yellow) |
+| `clean` | no changes (green) |
 | `↑N` | ahead of upstream by N commits (cyan) |
 | `↓N` | behind upstream by N commits (red) |
 | `no upstream` | branch has no remote tracking |
@@ -81,8 +84,8 @@ locations and per-repo errors.
 
 | Flag | Effect |
 |---|---|
-| `-b` | block/card layout with branch, remote and last commit |
-| `-p` | with `-b`: per-file dirty breakdown with +/− counts |
+| `-b` | block/card layout with branch, status and remote |
+| `-p` | with `-b`: per-file dirty breakdown with +/− counts, plus the last commit |
 | `-2`, `-3` | scan subdirectories deeper (default depth 1). Repos found deeper are labelled by their nesting path (`team/webapp`); worktrees of an already-listed repo are not duplicated |
 | `--debug` | show per-repo errors on stderr; stale/broken repos are skipped silently otherwise |
 | `--no-icons` | disable Nerd Font glyphs |

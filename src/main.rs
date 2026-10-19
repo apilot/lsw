@@ -41,8 +41,8 @@ fn main() {
             println!();
             println!("Usage: lsw [flags] [path]");
             println!();
-            println!("  -b        block cards with remote and last commit");
-            println!("  -p        with -b: per-file dirty breakdown (+added/−deleted)");
+            println!("  -b        block cards with branch, status and remote");
+            println!("  -p        with -b: per-file dirty breakdown (+added/−deleted) and last commit");
             println!("  -1 -2 -3  scan plain folders N levels deep (default 1)");
             println!("  --no-icons  disable Nerd Font glyphs");
             println!("  --debug   show skipped/unreadable directories");
