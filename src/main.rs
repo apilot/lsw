@@ -1,13 +1,17 @@
 //! lsw — read-only list of git worktrees: branch, dirty state, ahead/behind.
 //!
 //! Modes (KISS):
-//! - inside a git repo → worktrees of that repo;
+//! - inside a git repo (any depth, linked worktrees included) → worktrees
+//!   of that repo, anchored at its main worktree;
 //! - inside a plain folder → scan subdirectories for repos (depth 1 by
 //!   default, `-2`/`-3` deeper; nested repos labelled `dir/repo`; worktrees
 //!   nested in a listed repo are not duplicated, siblings beside it get
 //!   their own groups).
-//! Flags: `-b` block cards, `-p` per-file dirty breakdown (with `-b`),
-//! `--debug` shows per-repo errors (stale/broken repos are skipped silently).
+//!
+//! Flags:
+//!
+//! - `-b` block cards, `-p` per-file dirty breakdown (with `-b`)
+//! - `--debug` shows per-repo errors (stale/broken repos are skipped silently).
 
 mod git;
 mod parse;
@@ -89,12 +93,12 @@ fn run(
     debug: bool,
 ) -> Result<(), LswError> {
     let dir = git::canonicalize(target)?;
-    let (repos, skipped) = if git::has_git(&dir) {
-        let label = dir
+    let (repos, skipped) = if let Some(anchor) = anchor_root(&dir) {
+        let label = anchor
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        (vec![Hit { path: dir.clone(), label }], Vec::new())
+        (vec![Hit { path: anchor, label }], Vec::new())
     } else {
         scan_repos(&dir, depth)?
     };
@@ -294,6 +298,15 @@ fn real_root(dir: &Path) -> Option<PathBuf> {
     let idx = s.rfind("/.git/worktrees/")?;
     let root = PathBuf::from(&s[..idx]);
     root.canonicalize().ok()
+}
+
+/// Anchor for inside-repo mode: the root of the repository containing
+/// `dir` — climbing up from any subdirectory; a linked worktree resolves
+/// to its main repo (`real_root`). `None` → not inside a repo → the
+/// caller falls back to scanning. Mirrors `git worktree list`, which
+/// works from anywhere inside the repository.
+fn anchor_root(dir: &Path) -> Option<PathBuf> {
+    dir.ancestors().find_map(real_root)
 }
 
 /// Linked worktree whose gitdir target is gone (the repo was moved or
@@ -550,6 +563,35 @@ mod tests {
         assert_eq!(real_root(&wt), Some(root.join("real").canonicalize().unwrap()));
         fs::write(wt.join(".git"), "gitdir: /somewhere/.git/modules/sub\n").unwrap();
         assert_eq!(real_root(&wt), None);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn anchor_root_climbs_from_subdirectory() {
+        // Inside a repo, any depth: anchor = the repo root (git's semantics).
+        let root = tmpdir("anchor-sub");
+        mkrepo(&root.join("crm"));
+        let sub = root.join("crm/docs/tasks");
+        fs::create_dir_all(&sub).unwrap();
+        assert_eq!(anchor_root(&sub), Some(root.join("crm").canonicalize().unwrap()));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn anchor_root_of_linked_worktree_is_main_repo() {
+        // `.wt/fix-1` inside `crm`: the family anchor is `crm`, not the wt.
+        let root = tmpdir("anchor-wt");
+        mkrepo(&root.join("crm"));
+        let wt = root.join("crm/.wt/fix-1");
+        mkworktree(&wt, &root.join("crm"));
+        assert_eq!(anchor_root(&wt), Some(root.join("crm").canonicalize().unwrap()));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn anchor_root_none_outside_repo() {
+        let root = tmpdir("anchor-out");
+        assert_eq!(anchor_root(&root.join("plain/deep")), None);
         fs::remove_dir_all(&root).unwrap();
     }
 }

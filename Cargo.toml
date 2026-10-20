@@ -1,10 +1,11 @@
 [package]
 name = "lsw"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 rust-version = "1.70"
 description = "Fast read-only list of git worktrees: branch, dirty state, ahead/behind — at a glance, across all repos in a folder"
 license = "MIT"
+readme = "README.md"
 repository = "https://github.com/apilot/lsw"
 keywords = ["git", "worktree", "cli", "terminal", "productivity"]
 categories = ["command-line-utilities", "development-tools"]

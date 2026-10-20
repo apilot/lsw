@@ -28,6 +28,9 @@ compose.
 # install script (latest prebuilt binary, x86_64-linux)
 curl -fsSL https://raw.githubusercontent.com/apilot/lsw/main/install.sh | sh
 
+# or from crates.io
+cargo install lsw
+
 # or build from source (any platform with Rust + git)
 cargo install --git https://github.com/apilot/lsw
 ```
@@ -44,7 +47,8 @@ into `~/.local/bin` (override with `LSW_PREFIX`).
 
 ## Usage
 
-Run inside a repository to list **its** worktrees, or inside any folder to
+Run inside a repository — from its root, any subdirectory or a linked
+worktree — to list **its** worktrees, or inside any folder to
 scan repositories one level deep (`-2` / `-3` to look deeper):
 
 ```sh
@@ -110,6 +114,9 @@ ANSI-colored only in a TTY — safe to pipe into `grep`/`fzf`.
 
 ## Notes
 
+- Inside a repository the output anchors to its main worktree: from any
+  subdirectory or linked worktree you get the same family
+  `git worktree list` shows from there.
 - Linked worktrees are recognized: ones nested inside their repository fold
   under its header and are not listed twice; sibling worktrees sitting
   beside the repository get their own groups — nothing disappears.

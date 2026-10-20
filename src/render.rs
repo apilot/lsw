@@ -1112,7 +1112,7 @@ mod tests {
             vec![("a".to_owned(), "x".to_owned()), ("b".to_owned(), "y".to_owned())],
         );
         let plain = RenderOpts { width: 80, color: false, group_by_repo: false, blocks: true, icons: false, detail: false };
-        let out = render_tree(&[row.clone()], &plain);
+        let out = render_tree(std::slice::from_ref(&row), &plain);
         let lines: Vec<&str> = out.lines().collect();
         let remote = lines.iter().position(|l| l.starts_with("│ remote")).expect("remote field present");
         let links = lines.iter().position(|l| l.starts_with("│ links   2 broken")).expect("links field present");
