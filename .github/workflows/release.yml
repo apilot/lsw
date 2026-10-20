@@ -24,8 +24,8 @@ jobs:
 
       - name: Package
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          DIST="lsw-${VERSION}-x86_64-linux"
+          # keep the v in the asset name — install.sh expects lsw-v<X>-...
+          DIST="lsw-${GITHUB_REF_NAME}-x86_64-linux"
           mkdir -p "dist/${DIST}"
           cp target/release/lsw "dist/${DIST}/"
           cp README.md LICENSE "dist/${DIST}/"
