@@ -1,5 +1,5 @@
 [package]
-name = "lsw"
+name = "ls-worktrees"
 version = "0.1.6"
 edition = "2021"
 rust-version = "1.70"
@@ -11,6 +11,11 @@ keywords = ["git", "worktree", "cli", "terminal", "productivity"]
 categories = ["command-line-utilities", "development-tools"]
 
 # KISS: zero external dependencies — std + system git only.
+
+# Command stays `lsw` regardless of the crates.io package name.
+[[bin]]
+name = "lsw"
+path = "src/main.rs"
 
 [profile.release]
 lto = true

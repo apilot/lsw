@@ -62,7 +62,7 @@ jobs:
 
             Install: `curl -fsSL https://raw.githubusercontent.com/apilot/lsw/main/install.sh | sh`
 
-            Or install from crates.io: `cargo install lsw`
+            Or install from crates.io: `cargo install ls-worktrees` (the command is `lsw`)
 
   publish:
     name: Publish to crates.io
