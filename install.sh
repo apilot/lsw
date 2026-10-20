@@ -37,6 +37,14 @@ curl -fsSL "$BASE/$ASSET.sha256" -o "$TMP/$ASSET.sha256"
 
 tar xzf "$TMP/$ASSET" -C "$TMP"
 
+# Layout tolerance: releases are flat (lsw at archive root), but a CDN may
+# serve a stale copy where the binary sits inside a versioned directory.
+if [ ! -f "$TMP/lsw" ]; then
+  for nested in "$TMP"/*/lsw; do
+    [ -f "$nested" ] && mv "$nested" "$TMP/lsw" && break
+  done
+fi
+
 DEST="${LSW_PREFIX:-$HOME/.local/bin}"
 mkdir -p "$DEST"
 install -m 755 "$TMP/lsw" "$DEST/lsw"
