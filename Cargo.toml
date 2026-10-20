@@ -1,9 +1,9 @@
 [package]
 name = "ls-worktrees"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 rust-version = "1.70"
-description = "Fast read-only list of git worktrees: branch, dirty state, ahead/behind — at a glance, across all repos in a folder"
+description = "Fast read-only list of git worktrees: branch, dirty state, ahead/behind — at a glance, from any directory inside a repo or across all repos in a folder"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/apilot/lsw"

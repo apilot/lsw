@@ -7,7 +7,8 @@ branch it holds, whether it is dirty, and how far it drifted from the remote.
 
 Built for the "each task gets its own worktree" workflow: instead of
 `cd`-ing around and running `git status` five times, run `lsw` once in your
-projects folder and instantly know where to continue working.
+projects folder — or anywhere inside a repo, a subdirectory or a linked
+worktree is enough.
 
 ## Why
 
