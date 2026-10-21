@@ -513,11 +513,13 @@ fn render_block(row: &Row, opts: &RenderOpts) -> String {
     out
 }
 
-/// Card header path: scan mode `./repo[/.wt/x]`; single mode `./`,
-/// `./wt/x`, `../y`, `~/z`.
+/// Card header path: scan mode `./repo[/.wt/x]`; anchored run: the anchor
+/// (`./repo`) — or the subpath alone when it escapes the anchor root
+/// (`../sibling`, `~/wt`); `./repo/../x` would be noise.
 fn block_label(row: &Row) -> String {
     match (&row.repo, &row.subpath) {
         (Some(r), None) => format!("./{r}"),
+        (Some(_), Some(s)) if s.starts_with("..") || s.starts_with('~') => s.clone(),
         (Some(r), Some(s)) => format!("./{r}/{s}"),
         (None, None) => "./".to_owned(),
         (None, Some(s)) if s.starts_with("..") || s.starts_with('~') => s.clone(),
@@ -902,6 +904,50 @@ mod tests {
         let first = out.lines().next().unwrap();
         assert!(first.starts_with("┌─ \u{f07b} ./api"), "header: {first:?}");
         assert!(first.ends_with('┐'));
+    }
+
+    #[test]
+    fn block_header_shows_anchored_sibling_subpath_alone() {
+        // Anchored run: a sibling worktree outside the anchor root — the
+        // header is the clean `../wt-a`, not the noisy `./proj/../wt-a`.
+        let row = Row {
+            repo: Some("proj".to_owned()),
+            remote: None,
+            current: true,
+            branch: "a".to_owned(),
+            subpath: Some("../wt-a".to_owned()),
+            state: vec![StateSeg::Clean],
+            broken: 0,
+            broken_list: Vec::new(),
+            last: None,
+            files: Vec::new(),
+        };
+        let opts =
+            RenderOpts { width: 60, color: false, group_by_repo: true, blocks: true, icons: false, detail: false };
+        let first = render_tree(&[row], &opts).lines().next().unwrap().to_owned();
+        assert!(first.contains("┌─ ../wt-a"), "header: {first:?}");
+        assert!(!first.contains("/.."), "no unnormalized up-path: {first:?}");
+    }
+
+    #[test]
+    fn block_header_joins_nested_subpath_under_repo() {
+        // Scan guard: a worktree nested in the repo stays joined — `./repo/.wt/x`.
+        let row = Row {
+            repo: Some("proj".to_owned()),
+            remote: None,
+            current: false,
+            branch: "fix".to_owned(),
+            subpath: Some(".wt/fix-1".to_owned()),
+            state: vec![StateSeg::Clean],
+            broken: 0,
+            broken_list: Vec::new(),
+            last: None,
+            files: Vec::new(),
+        };
+        let opts =
+            RenderOpts { width: 60, color: false, group_by_repo: true, blocks: true, icons: false, detail: false };
+        let first = render_tree(&[row], &opts).lines().next().unwrap().to_owned();
+        assert!(first.contains("┌─ ./proj/.wt/fix-1"), "header: {first:?}");
     }
 
     #[test]

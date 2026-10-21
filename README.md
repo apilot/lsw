@@ -81,7 +81,7 @@ target it points to:
 | Token | Meaning |
 |---|---|
 | `./repo · host/user/repo` | group/card header: folder path and the origin remote in compact form (shown when the repository has an `origin`) |
-| `· .wt/name` | directory of a linked worktree nested inside the repository |
+| `· .wt/name`, `· ../name` | linked worktree directory — nested inside the repository folder / sitting beside it |
 | `*` (green) | the worktree you are currently in |
 | `N dirty` | uncommitted changes (yellow) |
 | `clean` | no changes (green) |

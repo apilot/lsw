@@ -1,8 +1,8 @@
 //! lsw — read-only list of git worktrees: branch, dirty state, ahead/behind.
 //!
 //! Modes (KISS):
-//! - inside a git repo (any depth, linked worktrees included) → worktrees
-//!   of that repo, anchored at its main worktree;
+//! - inside a git repo (any depth, linked worktrees included) → the whole
+//!   worktree family of that repo, anchored at its main worktree;
 //! - inside a plain folder → scan subdirectories for repos (depth 1 by
 //!   default, `-2`/`-3` deeper; nested repos labelled `dir/repo`; worktrees
 //!   nested in a listed repo are not duplicated, siblings beside it get
@@ -93,14 +93,15 @@ fn run(
     debug: bool,
 ) -> Result<(), LswError> {
     let dir = git::canonicalize(target)?;
-    let (repos, skipped) = if let Some(anchor) = anchor_root(&dir) {
+    let (repos, skipped, anchored) = if let Some(anchor) = anchor_root(&dir) {
         let label = anchor
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        (vec![Hit { path: anchor, label }], Vec::new())
+        (vec![Hit { path: anchor, label }], Vec::new(), true)
     } else {
-        scan_repos(&dir, depth)?
+        let (repos, skipped) = scan_repos(&dir, depth)?;
+        (repos, skipped, false)
     };
 
     let current_dir = env::current_dir().unwrap_or_else(|_| dir.clone());
@@ -111,7 +112,10 @@ fn run(
     let mut errors = Vec::new();
     for Hit { path: repo, label: name } in &repos {
         let remote = git::remote_of(repo).map(|url| git::short_remote(&url));
-        match collect_repo_rows(repo, &current_dir, home.as_deref(), blocks && print_files, symlinks) {
+        // Anchored run: the whole worktree family; scan: own subtree only.
+        let scope = if anchored { None } else { Some(repo.as_path()) };
+        match collect_repo_rows(repo, scope, &current_dir, home.as_deref(), blocks && print_files, symlinks)
+        {
             Ok(mut repo_rows) => {
                 // Name + origin in BOTH modes: scan mode → group header,
                 // single mode → card label (`./name` instead of bare `./`).
@@ -325,14 +329,17 @@ fn stale_worktree(dir: &Path) -> bool {
     !gitdir.exists()
 }
 
-/// All worktree rows of one repository, filtered to the repository's own
-/// subtree: the root worktree itself plus worktrees nested inside it
-/// (`wt/...`). Sibling worktrees of the shared repo are the other scan
-/// groups' business — the owner wants only "what lives here".
+/// All worktree rows of one repository. `scope` bounds the listing to the
+/// repository's own subtree — scan mode (`Some(repo)`): sibling worktrees
+/// outside the folder are the other groups' business, otherwise every group
+/// would repeat the whole family. `None` = anchored run from inside a repo:
+/// the whole `git worktree list` family shows, wherever it lives — that is
+/// what git itself answers from anywhere inside the repository.
 /// `detail` (`-bp`) fills `last` and the per-file dirty breakdown;
 /// `symlinks` (`-s`) counts broken top-level symlinks per non-bare entry.
 fn collect_repo_rows(
     repo: &Path,
+    scope: Option<&Path>,
     current_dir: &Path,
     home: Option<&Path>,
     detail: bool,
@@ -341,8 +348,10 @@ fn collect_repo_rows(
     let entries = git::list_worktrees(repo)?;
     let mut rows = Vec::with_capacity(entries.len());
     for entry in &entries {
-        if entry.path != repo && !entry.path.starts_with(repo) {
-            continue;
+        if let Some(scope) = scope {
+            if entry.path != scope && !entry.path.starts_with(scope) {
+                continue;
+            }
         }
         let status = if entry.bare {
             WorktreeStatus::default()
@@ -593,5 +602,61 @@ mod tests {
         let root = tmpdir("anchor-out");
         assert_eq!(anchor_root(&root.join("plain/deep")), None);
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    // --- Real-git helpers: the family view depends on actual
+    // `git worktree list` output, which the fs-only fakes can't express.
+
+    fn rgit(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// The 0.1.7 report layout: `proj/` (one commit) + `../wt-a` + `../wt-b`
+    /// — linked worktrees OUTSIDE the repo folder.
+    fn real_repo_with_siblings(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let root = tmpdir(name);
+        let proj = root.join("proj");
+        fs::create_dir_all(&proj).unwrap();
+        rgit(&proj, &["init", "-q"]);
+        fs::write(proj.join("f.txt"), "x").unwrap();
+        rgit(&proj, &["add", "."]);
+        rgit(&proj, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]);
+        for b in ["a", "b"] {
+            let wt = root.join(format!("wt-{b}"));
+            rgit(&proj, &["worktree", "add", "-q", "-b", b, wt.to_str().unwrap()]);
+        }
+        (proj, root.join("wt-a"), root.join("wt-b"))
+    }
+
+    #[test]
+    fn anchored_run_shows_sibling_worktrees_outside_repo_folder() {
+        // The 0.1.7 report: anchored run sees only ./proj — wt-a/wt-b are
+        // dropped by the subtree filter, the current worktree is invisible.
+        let (proj, wta, _wtb) = real_repo_with_siblings("anchor-family");
+        let (proj, wta) = (proj.canonicalize().unwrap(), wta.canonicalize().unwrap());
+        let rows = collect_repo_rows(&proj, None, &wta, None, false, false).unwrap();
+        assert_eq!(rows.len(), 3, "anchored run must list the whole family");
+        let a = rows.iter().find(|r| r.branch == "a").expect("branch a listed");
+        assert!(a.current, "current worktree must carry the * marker");
+    }
+
+    #[test]
+    fn scan_group_keeps_only_its_own_subtree() {
+        // Scan guard: a group shows its own folder only — siblings outside
+        // it are the other groups' business (v0.1.4 semantics, no dup rows).
+        let (proj, _wta, _wtb) = real_repo_with_siblings("scan-family");
+        let proj = proj.canonicalize().unwrap();
+        let rows = collect_repo_rows(&proj, Some(&proj), &proj, None, false, false).unwrap();
+        assert_eq!(rows.len(), 1, "scan group = the repo folder itself");
     }
 }
