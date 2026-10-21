@@ -25,61 +25,97 @@ use std::path::{Path, PathBuf};
 use git::LswError;
 use parse::WorktreeStatus;
 
-fn main() {
-    let mut blocks = false;
-    let mut print_files = false;
-    let mut symlinks = false;
-    let mut no_icons = false;
-    let mut debug = false;
-    let mut depth = 1usize;
-    let mut target = ".".to_owned();
-    for arg in env::args().skip(1) {
-        if arg == "--no-icons" {
-            no_icons = true;
-        } else if arg == "--debug" {
-            debug = true;
-        } else if arg == "--version" || arg == "-V" || arg == "-v" {
-            println!("lsw {}", env!("CARGO_PKG_VERSION"));
-            return;
-        } else if arg == "--help" || arg == "-h" {
-            println!("lsw {} — ls for git worktrees", env!("CARGO_PKG_VERSION"));
-            println!();
-            println!("Usage: lsw [flags] [path]");
-            println!();
-            println!("  -b        block cards with branch, status and remote");
-            println!("  -p        with -b: per-file dirty breakdown (+added/−deleted), last commit (+broken symlink list with -s)");
-            println!("  -s        report broken top-level symlinks in worktree roots");
-            println!("  -1 -2 -3  scan plain folders N levels deep (default 1)");
-            println!("  --no-icons  disable Nerd Font glyphs");
-            println!("  --debug   show skipped/unreadable directories");
-            println!("  -v, -V    print version");
-            println!();
-            println!("NO_COLOR / NO_ICONS disable colors / glyphs.");
-            return;
-        } else if let Some(flags) = arg.strip_prefix('-') {
-            for f in flags.chars() {
-                match f {
-                    'b' => blocks = true,
-                    'p' => print_files = true,
-                    's' => symlinks = true,
-                    '1' | '2' | '3' => depth = f.to_digit(10).unwrap() as usize,
-                    '4'..='9' => {
-                        eprintln!("lsw: scan depth -{f} not supported (max -3)");
-                        std::process::exit(1);
-                    }
-                    _ => {
-                        eprintln!("lsw: unknown flag: -{f}");
-                        std::process::exit(1);
+struct ScanArgs {
+    target: String,
+    blocks: bool,
+    print_files: bool,
+    symlinks: bool,
+    no_icons: bool,
+    debug: bool,
+    depth: usize,
+}
+
+enum Action {
+    Help,
+    Version,
+    Scan(ScanArgs),
+}
+
+/// Anything that does not match a known flag acts as if `--help` was given.
+fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Action {
+    let mut a = ScanArgs {
+        target: ".".to_owned(),
+        blocks: false,
+        print_files: false,
+        symlinks: false,
+        no_icons: false,
+        debug: false,
+        depth: 1,
+    };
+    for arg in args {
+        match arg.as_str() {
+            "--no-icons" => a.no_icons = true,
+            "--debug" => a.debug = true,
+            "--version" | "-V" | "-v" => return Action::Version,
+            "--help" | "-h" => return Action::Help,
+            _ if arg.starts_with('-') => {
+                let mut unknown = false;
+                for f in arg[1..].chars() {
+                    match f {
+                        'b' => a.blocks = true,
+                        'p' => a.print_files = true,
+                        's' => a.symlinks = true,
+                        '1' | '2' | '3' => a.depth = f.to_digit(10).unwrap() as usize,
+                        _ => {
+                            unknown = true;
+                            break;
+                        }
                     }
                 }
+                if unknown {
+                    return Action::Help;
+                }
             }
-        } else {
-            target = arg;
+            _ => a.target = arg,
         }
     }
-    if let Err(err) = run(Path::new(&target), blocks, print_files, symlinks, no_icons, depth, debug) {
-        eprintln!("lsw: {err}");
-        std::process::exit(1);
+    Action::Scan(a)
+}
+
+fn print_help() {
+    println!("lsw {} — ls for git worktrees", env!("CARGO_PKG_VERSION"));
+    println!();
+    println!("Usage: lsw [flags] [path]");
+    println!();
+    println!("  -b        block cards with branch, status and remote");
+    println!("  -p        with -b: per-file dirty breakdown (+added/−deleted), last commit (+broken symlink list with -s)");
+    println!("  -s        report broken top-level symlinks in worktree roots");
+    println!("  -1 -2 -3  scan plain folders N levels deep (default 1)");
+    println!("  --no-icons  disable Nerd Font glyphs");
+    println!("  --debug   show skipped/unreadable directories");
+    println!("  -v, -V    print version");
+    println!();
+    println!("NO_COLOR / NO_ICONS disable colors / glyphs.");
+}
+
+fn main() {
+    match parse_args(env::args().skip(1)) {
+        Action::Help => print_help(),
+        Action::Version => println!("lsw {}", env!("CARGO_PKG_VERSION")),
+        Action::Scan(a) => {
+            if let Err(err) = run(
+                Path::new(&a.target),
+                a.blocks,
+                a.print_files,
+                a.symlinks,
+                a.no_icons,
+                a.depth,
+                a.debug,
+            ) {
+                eprintln!("lsw: {err}");
+                std::process::exit(1);
+            }
+        }
     }
 }
 
@@ -434,6 +470,54 @@ mod tests {
 
     fn labels(root: &Path, depth: usize) -> Vec<String> {
         scan_repos(root, depth).unwrap().0.into_iter().map(|h| h.label).collect()
+    }
+
+    fn args_of(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn unknown_long_flag_behaves_like_help() {
+        assert!(matches!(parse_args(args_of(&["--foo"])), Action::Help));
+    }
+
+    #[test]
+    fn unknown_short_flag_behaves_like_help() {
+        assert!(matches!(parse_args(args_of(&["-x"])), Action::Help));
+    }
+
+    #[test]
+    fn unknown_flag_inside_cluster_behaves_like_help() {
+        assert!(matches!(parse_args(args_of(&["-bx"])), Action::Help));
+    }
+
+    #[test]
+    fn unsupported_depth_behaves_like_help() {
+        assert!(matches!(parse_args(args_of(&["-5"])), Action::Help));
+    }
+
+    #[test]
+    fn help_flags_yield_help() {
+        for a in ["--help", "-h"] {
+            assert!(matches!(parse_args(args_of(&[a])), Action::Help));
+        }
+    }
+
+    #[test]
+    fn version_flags_yield_version() {
+        for a in ["--version", "-V", "-v"] {
+            assert!(matches!(parse_args(args_of(&[a])), Action::Version));
+        }
+    }
+
+    #[test]
+    fn known_flags_and_path_parse_unchanged() {
+        let Action::Scan(a) = parse_args(args_of(&["-bp", "-2", "some/path"])) else {
+            panic!("expected Scan");
+        };
+        assert!(a.blocks && a.print_files && !a.symlinks && !a.no_icons && !a.debug);
+        assert_eq!(a.depth, 2);
+        assert_eq!(a.target, "some/path");
     }
 
     #[test]

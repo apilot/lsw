@@ -97,7 +97,8 @@ target it points to:
 
 When nothing is found, `lsw` prints a short notice — where it looked, how deep,
 how many directories were unreadable — and exits 0. `--debug` lists skipped
-locations and per-repo errors.
+locations and per-repo errors. Any argument that is not a known flag prints
+the help text and exits 0 — as if `--help` was given.
 
 | Flag | Effect |
 |---|---|
