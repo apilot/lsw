@@ -26,7 +26,7 @@ compose.
 ## Install
 
 ```sh
-# install script (latest prebuilt binary, x86_64-linux)
+# install script (latest prebuilt binary, x86_64-linux or aarch64-linux)
 curl -fsSL https://raw.githubusercontent.com/apilot/lsw/main/install.sh | sh
 
 # or from crates.io (package name `ls-worktrees`, the command is `lsw`)
