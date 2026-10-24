@@ -10,6 +10,7 @@ REPO="apilot/lsw"
 
 case "$(uname -m)" in
   x86_64) ARCH=x86_64 ;;
+  aarch64|arm64) ARCH=aarch64 ;;
   *)
     echo "lsw installer: no prebuilt binary for $(uname -m)." >&2
     echo "Install from source instead:" >&2
